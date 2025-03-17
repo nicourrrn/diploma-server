@@ -226,7 +226,7 @@ fake_funds_db: dict[str, FundCreate] = {
     "1": FundCreate(
         name="Fund 1",
         description="Description 1",
-        mono_jar_url="https://www.google.com",
+        mono_jar_url="https://send.monobank.ua/jar/3vQFtQPSYe",
         status=StatusEnum.active,
         picture="https://www.google.com",
         requirement_id="1",
@@ -235,7 +235,7 @@ fake_funds_db: dict[str, FundCreate] = {
     "2": FundCreate(
         name="Fund 2",
         description="Description 2",
-        mono_jar_url="https://www.google.com",
+        mono_jar_url="https://send.monobank.ua/jar/3vQFtQPSYe",
         status=StatusEnum.active,
         picture="https://www.google.com",
         requirement_id="2",
