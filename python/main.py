@@ -222,6 +222,33 @@ class Fund(FundBase):
         from_attributes = True
 
 
+fake_funds_db: dict[str, FundCreate] = {
+    "1": FundCreate(
+        name="Fund 1",
+        description="Description 1",
+        mono_jar_url="https://www.google.com",
+        status=StatusEnum.active,
+        picture="https://www.google.com",
+        requirement_id="1",
+        volunteer_id="1",
+    ),
+    "2": FundCreate(
+        name="Fund 2",
+        description="Description 2",
+        mono_jar_url="https://www.google.com",
+        status=StatusEnum.active,
+        picture="https://www.google.com",
+        requirement_id="2",
+        volunteer_id="2",
+    ),
+}
+
+
+async def search_fund(query: str) -> list[FundBase]:
+    funds = fake_funds_db.values()
+    return list([f for f in funds if query in f.name])
+
+
 # Recipient Schema
 class RecipientBase(BaseModel):
     name: str
@@ -299,3 +326,8 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
         data={"sub": user["email"]}, expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.get("/search", response_model=list[FundBase])
+async def search(query: str) -> list[FundBase]:
+    return await search_fund(query)
