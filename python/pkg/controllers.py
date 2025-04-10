@@ -6,23 +6,24 @@ import dotenv
 from .database import Repository, SqliteRepository
 from .models import *
 
-dotenv.load_dotenv()
-database: Callable[[], Repository]
-match getenv("DATABASE", "sqlite"):
-    case "sqlite":
-        database = lambda: SqliteRepository(getenv("DB_PATH", "db.sqlite"))
-        database().init_database()
-    case _:
-        raise ValueError("Database not supported")
+
+def init() -> Callable[[], Repository]:
+    dotenv.load_dotenv()
+    match getenv("DATABASE", "sqlite"):
+        case "sqlite":
+            database = lambda: SqliteRepository(getenv("DB_PATH", "db.sqlite"))
+        case _:
+            raise ValueError("Database not supported")
+
+    return database
+
+
+database = init()
 
 
 def search_funds(query: str) -> list[Fund]:
     result = database().search_funds(query)
     return [Fund(**row) for row in result]
-
-
-def register_fund(fund: FundBase):
-    pass
 
 
 def get_requirements() -> list[RequirementWithItems]:

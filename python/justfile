@@ -1,2 +1,6 @@
 run:
     source ./.venv/bin/activate && python -m bin.main 
+
+database:
+    source ./.venv/bin/activate && python -m bin.db_manager
+    
