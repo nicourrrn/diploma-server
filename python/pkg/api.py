@@ -1,69 +1,65 @@
-from fastapi import Depends
+from fastapi import Request
 from fastapi.routing import APIRouter
-from fastapi.security import OAuth2PasswordRequestForm
 
-from . import controllers
+from pkg.controllers import volunteer_funds
+
 from .models import *
+from pkg.database import (
+    create_items,
+    create_requirement,
+    delete_requirement,
+    get_funds,
+    get_items_by_requirement,
+    get_requirements,
+    search_funds,
+)
 
 router = APIRouter()
 
 
 @router.get("/fund")
-def search_funds(query: str) -> list[Fund]:
-    return controllers.search_funds(query)
-
-
-@router.get("/profile")
-def get_profile():
-    return {"message": "Fetching user profile"}
-
-
-@router.post("/profile/login")
-def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    return {"message": f"Logging in user: {form_data.username}"}
+async def search_funds_endpoint(query: str, req: Request) -> list[Fund]:
+    db = req.app.state.db
+    result = await search_funds(db, query)
+    return result
 
 
 @router.get("/requirements")
-def list_requirements():
-    return controllers.get_requirements()
+async def get_requirements_endpoint(req: Request) -> list[RequirementWithItems]:
+    db = req.app.state.db
+    requirements = await get_requirements(db)
+    for requirement in requirements:
+        requirement.items = await get_items_by_requirement(db, requirement.id)
+    return requirements
 
 
 @router.post("/requirements")
-async def create_requirement(req: RequirementCreate):
-    print(f"Create requirements: {req}")
-    controllers.create_requirement(req)
+async def create_requirement_endpoint(requirement: RequirementCreate, req: Request):
+    db = req.app.state.db
+    await create_requirement(db, requirement)
+    return {"message": "Requirement created"}
 
 
 @router.post("/requirements/{requirement_id}/items")
-async def create_items(requirement_id: str, items: list[ItemBase]):
-    print(f"Create items for requirement {requirement_id}: {items}")
-    controllers.create_items(items, requirement_id)
-    return {"message": f"Items created for requirement {requirement_id}"}
-
-
-@router.get("/requirements/{requirement_id}")
-def read_requirement(requirement_id: int):
-    return {"message": f"Reading requirement with ID: {requirement_id}"}
-
-
-# @router.put("/requirements/{requirement_id}")
-# def update_requirement(requirement_id: int, requirement: RequirementUpdate):
-#     return {
-#         "message": f"Updating requirement with ID: {requirement_id} to {requirement}"
-#     }
+async def create_items_endpoint(
+    requirement_id: str, items: list[ItemBase], req: Request
+):
+    db = req.app.state.db
+    await create_items(db, items, requirement_id)
+    return {"message": "Items created"}
 
 
 @router.delete("/requirements/{requirement_id}")
-def delete_requirement(requirement_id: str):
-    print(f"Delete requirement with ID: {requirement_id}")
-    controllers.delete_requirement(requirement_id)
-    return {"message": f"Requirement with ID: {requirement_id} deleted"}
+async def delete_requirement_endpoint(requirement_id: str, req: Request):
+    db = req.app.state.db
+    await delete_requirement(db, requirement_id)
+    return {"message": f"Requirement with ID {requirement_id} deleted"}
 
 
 @router.get("/volunteer/{volunteer_id}/funds")
-def get_volunteer_funds(volunteer_id: str):
-    print(f"Get funds for volunteer with ID: {volunteer_id}")
-    funds = controllers.volunteer_funds(volunteer_id)
+async def get_volunteer_funds_endpoint(volunteer_id: str, req: Request) -> list[Fund]:
+    db = req.app.state.db
+    funds = await get_funds(db, volunteer_id)
     return funds
 
 
