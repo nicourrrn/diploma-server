@@ -46,6 +46,13 @@ class RoleEnum(str, Enum):
 
 
 # UserAccount Schema
+
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+
 class UserAccountBase(BaseModel):
     email: EmailStr
     bio: Optional[str] = None

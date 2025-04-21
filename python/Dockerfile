@@ -5,8 +5,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bin bin
 COPY pkg pkg
-COPY db.sqlite db.sqlite
+COPY database.db database.db
 
 EXPOSE 8000
 
-CMD ["python",  "-m", "bin.main"]
+CMD ["python",  "-m", "bin.server"]

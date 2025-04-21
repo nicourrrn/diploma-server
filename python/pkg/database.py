@@ -2,12 +2,14 @@ import uuid
 from pkg.models import (
     Fund,
     Item,
-    Requirement,
     RequirementCreate,
     ItemBase,
     RequirementWithItems,
+    UserAccount,
 )
 from databases import Database as DatabaseCore
+
+from pkg.utils import verify_password
 
 
 class Database:
@@ -263,3 +265,72 @@ VALUES (:id, :name, :count, :requirement_id, :category)
                 "category": item.category,
             },
         )
+
+
+async def user_login(db: Database, email: str, password: str) -> UserAccount | None:
+    query = "SELECT * FROM UserAccount WHERE Email = :email"
+    user = await db.connection.fetch_one(query=query, values={"email": email})
+    if user and verify_password(password, user["PasswordHash"]):
+        return UserAccount(
+            id=user["ID"],
+            email=user["Email"],
+            bio=user["Bio"],
+            role=user["Role"],
+            last_login=user["LastLogin"],
+            profile_pic=user["ProfilePic"],
+        )
+
+
+async def get_volunteer_funds_for_dash(db: Database, volunteer_mail: str) -> list[Fund]:
+    query = """
+SELECT Fund.ID, Fund.Name, Fund.Description, Fund.MonoJarUrl, Fund.Status, Fund.Picture
+    FROM Fund
+JOIN Volunteer ON Fund.Volunteer = Volunteer.ID
+WHERE Volunteer.Email = :volunteer_mail
+"""
+    rows = await db.connection.fetch_all(
+        query=query, values={"volunteer_mail": volunteer_mail}
+    )
+
+    if rows:
+        return [
+            Fund(
+                id=f["id"],
+                name=f["name"],
+                description=f["description"],
+                mono_jar_url=f["mono_jar_url"],
+                status=f["status"],
+                picture=f["picture"],
+            )
+            for f in rows
+        ]
+    return []
+
+
+async def get_volunteer_requirements_for_dash(
+    db: Database, volunteer_mail: str
+) -> list[RequirementWithItems]:
+    query = """
+SELECT Requirement.ID, Requirement.Deadline, Requirement.Name, Requirement.priority
+FROM Requirement
+JOIN Fund ON Requirement.Fund = Fund.ID
+JOIN Volunteer ON Fund.Volunteer = Volunteer.ID
+WHERE Volunteer.Email = :volunteer_mail limit 5
+"""
+    rows = await db.connection.fetch_all(
+        query=query, values={"volunteer_mail": volunteer_mail}
+    )
+
+    if rows:
+        items = await get_items_by_requirement(db, rows[0]["id"])
+        return [
+            RequirementWithItems(
+                id=r["id"],
+                name=r["name"],
+                deadline=r["deadline"],
+                priority=r["priority"],
+                items=items,
+            )
+            for r in rows
+        ]
+    return []
