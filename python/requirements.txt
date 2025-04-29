@@ -53,7 +53,6 @@ starlette==0.46.1
 typing-extensions==4.13.1
     # via
     #   aiosqlite
-    #   anyio
     #   fastapi
     #   pydantic
     #   pydantic-core
