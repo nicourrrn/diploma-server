@@ -12,15 +12,6 @@ class IdMixin(BaseModel):
         from_attributes = True
 
 
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-
-
-class TokenData(BaseModel):
-    email: Optional[str] = None
-
-
 class StatusEnum(str, Enum):
     active = "Active"
     completed = "Completed"
@@ -68,13 +59,13 @@ class UserAccountCreate(UserAccountBase):
 class UserAccount(UserAccountBase, IdMixin): ...
 
 
-# Specific Schema
-class SpecificBase(BaseModel):
-    name: str
-    description: str
-
-
-class Specific(SpecificBase, IdMixin): ...
+# # Specific Schema
+# class SpecificBase(BaseModel):
+#     name: str
+#     description: str
+#
+#
+# class Specific(SpecificBase, IdMixin): ...
 
 
 # Volunteer Schema
@@ -100,7 +91,7 @@ class Volunteer(VolunteerBase, IdMixin):
 # Report Schema
 class ReportBase(BaseModel):
     rating: int
-    final_conclusion: str
+    final_conclution: str
 
 
 class Report(ReportBase, IdMixin): ...
@@ -122,6 +113,7 @@ class RequirementBase(BaseModel):
     name: str
     deadline: Optional[date] = None
     priority: PriorityEnum
+    description: str | None
 
 
 class RequirementCreate(RequirementBase):
@@ -129,10 +121,6 @@ class RequirementCreate(RequirementBase):
 
 
 class Requirement(RequirementBase, IdMixin): ...
-
-
-class RequirementWithItems(Requirement):
-    items: list[Item] = []
 
 
 # Fund Schema
@@ -170,22 +158,26 @@ class RecipientCreate(RecipientBase):
 class Recipient(RecipientBase, IdMixin): ...
 
 
-# FundRecipient Schema
-class FundRecipientBase(BaseModel):
-    fund_id: str
-    recipient_id: str
-    delivered_at: datetime
+class RequirementWithItems(Requirement):
+    items: list[Item] = []
+    recipient: Recipient | None = None
 
 
-class FundRecipient(FundRecipientBase):
-    class Config:
-        from_attributes = True
+class DetailFund(FundBase, IdMixin):
+    requirement: RequirementWithItems | None = None
+    report: Report | None = None
+    volunteer: Volunteer | None = None
 
 
-# # Volunteer Stats Schema
-# class VolunteerStats(BaseModel, IdMixin):
-#     name: str
-#     surname: str
-#     total_reports: int
-#     average_rating: float
-#     completed_funds: int
+class Dashboard(BaseModel):
+    funds: list[DetailFund]
+    requirements: list[RequirementWithItems]
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    user_account: UserAccount
+
+
+class VolunteerWithUserAccount(Volunteer):
+    user_account: UserAccount

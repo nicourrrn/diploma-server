@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from pkg.api import router
+from pkg.api import router, recipient_router, volunteer_router, requirement_router
 from pkg.database import Database
 from contextlib import asynccontextmanager
 
@@ -20,6 +20,21 @@ app.include_router(
     router,
     prefix="/api",
     tags=["api"],
+)
+app.include_router(
+    recipient_router,
+    prefix="/api",
+    tags=["recipient"],
+)
+app.include_router(
+    volunteer_router,
+    prefix="/api",
+    tags=["volunteer"],
+)
+app.include_router(
+    requirement_router,
+    prefix="/api",
+    tags=["fund"],
 )
 
 if __name__ == "__main__":
