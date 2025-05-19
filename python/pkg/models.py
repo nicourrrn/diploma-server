@@ -97,11 +97,13 @@ class ReportBase(BaseModel):
 class Report(ReportBase, IdMixin): ...
 
 
+
 # Item Schema
 class ItemBase(BaseModel):
     name: str
     count: int
     category: CategoryEnum
+    reserved_by: str | None
 
 
 class Item(ItemBase, IdMixin):
@@ -128,14 +130,15 @@ class FundBase(BaseModel):
     name: str
     description: str
     mono_jar_url: str
-    status: StatusEnum
-    picture: str | None
+    long_jar_id: str
+    status: StatusEnum = StatusEnum.active
+    picture: str | None = None
 
 
 class FundCreate(FundBase):
     report_id: Optional[str] = None
     requirement_id: str
-    volunteer_id: str
+    items: list[str] = []
 
 
 class Fund(FundBase, IdMixin): ...
@@ -163,6 +166,10 @@ class RequirementWithItems(Requirement):
     recipient: Recipient | None = None
 
 
+class RequirementWithItemsAndFund(RequirementWithItems):
+    fund: list[Fund] = []
+
+
 class DetailFund(FundBase, IdMixin):
     requirement: RequirementWithItems | None = None
     report: Report | None = None
@@ -181,3 +188,44 @@ class LoginResponse(BaseModel):
 
 class VolunteerWithUserAccount(Volunteer):
     user_account: UserAccount
+
+
+class VolunteerUpdate(BaseModel):
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    name: Optional[str] = None
+    surname: Optional[str] = None
+    age: Optional[str] = None
+    available: Optional[bool] = None
+    bio: Optional[str] = None
+    profile_pic: Optional[str] = None
+
+
+# class VolunteerBase(BaseModel):
+#     email: EmailStr
+#     phone: str
+#     name: str
+#     surname: str
+#     age: str
+#     available: bool
+
+
+# class UserAccountBase(BaseModel):
+#     email: EmailStr
+#     bio: Optional[str] = None
+#     role: RoleEnum = RoleEnum.volunteer
+#     last_login: Optional[datetime] = None
+#     profile_pic: Optional[str] = None
+
+
+class RequirementWithVolonteer(Requirement):
+    volunteer: Volunteer | None = None
+    items: list[Item] = []
+    recipient: Recipient | None = None
+
+
+class Message(BaseModel):
+    message: str
+
+
+class MessageWithId(Message, IdMixin): ...

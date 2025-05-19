@@ -1,0 +1,1582 @@
+from datetime import date, datetime
+from enum import Enum
+from typing import Optional
+
+from pydantic import BaseModel, EmailStr
+
+
+class IdMixin(BaseModel):
+    id: str
+
+    class Config:
+        from_attributes = True
+
+
+class StatusEnum(str, Enum):
+    active = "Active"
+    completed = "Completed"
+    cancelled = "Cancelled"
+
+
+class PriorityEnum(str, Enum):
+    default = "Default"
+    high = "High"
+
+
+class CategoryEnum(str, Enum):
+    food = "Food"
+    medicine = "Medicine"
+    equipment = "Equipment"
+    other = "Other"
+
+
+class RoleEnum(str, Enum):
+    admin = "Admin"
+    volunteer = "Volunteer"
+    recipient = "Recipient"
+
+
+# UserAccount Schema
+
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class UserAccountBase(BaseModel):
+    email: EmailStr
+    bio: Optional[str] = None
+    role: RoleEnum = RoleEnum.volunteer
+    last_login: Optional[datetime] = None
+    profile_pic: Optional[str] = None
+
+
+class UserAccountCreate(UserAccountBase):
+    password: str
+
+
+class UserAccount(UserAccountBase, IdMixin): ...
+
+
+# # Specific Schema
+# class SpecificBase(BaseModel):
+#     name: str
+#     description: str
+#
+#
+# class Specific(SpecificBase, IdMixin): ...
+
+
+# Volunteer Schema
+class VolunteerBase(BaseModel):
+    email: EmailStr
+    phone: str
+    name: str
+    surname: str
+    age: str
+    available: bool
+
+
+class VolunteerCreate(VolunteerBase):
+    specific_id: int
+    user_account_id: str
+
+
+class Volunteer(VolunteerBase, IdMixin):
+    rating: Optional[float] = None
+    total_reports: Optional[int] = None
+
+
+# Report Schema
+class ReportBase(BaseModel):
+    rating: int
+    final_conclution: str
+
+
+class Report(ReportBase, IdMixin): ...
+
+
+# Item Schema
+class ItemBase(BaseModel):
+    name: str
+    count: int
+    category: CategoryEnum
+    reserved_by: str | None
+
+
+class Item(ItemBase, IdMixin):
+    items_taken: Optional[int] = None
+
+
+# Requirement Schema
+class RequirementBase(BaseModel):
+    name: str
+    deadline: Optional[date] = None
+    priority: PriorityEnum
+    description: str | None
+
+
+class RequirementCreate(RequirementBase):
+    fund_id: str
+
+
+class Requirement(RequirementBase, IdMixin): ...
+
+
+# Fund Schema
+class FundBase(BaseModel):
+    name: str
+    description: str
+    mono_jar_url: str
+    long_jar_id: str
+    status: StatusEnum
+    picture: str | None
+
+
+class FundCreate(FundBase):
+    report_id: Optional[str] = None
+    requirement_id: str
+    volunteer_id: str
+
+
+class Fund(FundBase, IdMixin): ...
+
+
+class FundRepresentative(Fund):
+    volunteer_name: str
+    volunteer_surname: str
+
+
+# Recipient Schema
+class RecipientBase(BaseModel):
+    name: str
+
+
+class RecipientCreate(RecipientBase):
+    user_account_id: str
+
+
+class Recipient(RecipientBase, IdMixin): ...
+
+
+class RequirementWithItems(Requirement):
+    items: list[Item] = []
+    recipient: Recipient | None = None
+
+
+class RequirementWithItemsAndFund(RequirementWithItems):
+    fund: list[Fund] = []
+
+
+class DetailFund(FundBase, IdMixin):
+    requirement: RequirementWithItems | None = None
+    report: Report | None = None
+    volunteer: Volunteer | None = None
+
+
+class Dashboard(BaseModel):
+    funds: list[DetailFund]
+    requirements: list[RequirementWithItems]
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    user_account: UserAccount
+
+
+class VolunteerWithUserAccount(Volunteer):
+    user_account: UserAccount
+
+
+class VolunteerUpdate(BaseModel):
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    name: Optional[str] = None
+    surname: Optional[str] = None
+    age: Optional[str] = None
+    available: Optional[bool] = None
+    bio: Optional[str] = None
+    profile_pic: Optional[str] = None
+
+
+# class VolunteerBase(BaseModel):
+#     email: EmailStr
+#     phone: str
+#     name: str
+#     surname: str
+#     age: str
+#     available: bool
+
+
+# class UserAccountBase(BaseModel):
+#     email: EmailStr
+#     bio: Optional[str] = None
+#     role: RoleEnum = RoleEnum.volunteer
+#     last_login: Optional[datetime] = None
+#     profile_pic: Optional[str] = None
+from typing import Annotated
+from uuid import uuid1
+from fastapi import File, HTTPException, Header, Request, UploadFile
+from fastapi.routing import APIRouter
+
+from pkg.utils import (
+    create_access_token,
+    decode_access_token,
+    save_file,
+)
+
+from pkg.models import *
+from pkg.database import *
+
+
+router = APIRouter()
+
+fund_router = APIRouter(prefix="/fund", tags=["api"])
+
+
+@fund_router.get("/")
+async def search_funds_endpoint(query: str, req: Request) -> list[Fund]:
+    db = req.app.state.db
+    result = await get_funds(db, query)
+    return result
+
+
+@fund_router.get("/{fund_id}")
+async def get_fund_by_id_endpoint(fund_id: str, req: Request) -> DetailFund:
+    db = req.app.state.db
+
+    try:
+        fund = await get_fund_by_id(db, fund_id)
+        report = await get_report_by_fund(db, fund_id)
+        volunteer = await get_volunteer_by_fund(db, fund.id)
+        requirement = await get_requirement_by_fund(db, fund.id)
+        requirement.recipient = await get_recipient_by_requirement(db, requirement.id)
+    except DatabaseException as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return DetailFund(
+        **fund.model_dump(),
+        requirement=requirement,
+        report=report,
+        volunteer=volunteer,
+    )
+
+
+@fund_router.post("/photo")
+async def upload_fund_photo_endpoint(
+    token: Annotated[str | None, Header()],
+    req: Request,
+    fund_id: str,
+    fund_photo: UploadFile = File(...),
+) -> dict[str, str]:
+    db = req.app.state.db
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Token is missing")
+
+    if not (decode_access_token(token).get("sub")):
+        raise HTTPException(status_code=401, detail="Invalid token")
+    filename = f"{uuid1()}.jpg"
+    save_file(fund_photo.file, filename)
+    try:
+        await update_fund_picture(db, fund_id, f"/uploads/{filename}")
+    except DatabaseException as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return {"profile_pic": f"/uploads/{filename}"}
+
+
+requirement_router = APIRouter(prefix="/requirement", tags=["api"])
+
+
+@requirement_router.get("/")
+async def get_requirements_endpoint(
+    req: Request, query: str = ""
+) -> list[RequirementWithItems]:
+    db = req.app.state.db
+    try:
+        requirements = await (
+            get_requirements(db, query) if query != "" else get_requirements(db)
+        )
+        for requirement in requirements:
+            requirement.items = await get_items_by_requirement(db, requirement.id)
+            # requirement.recipient = await get_recipient_by_requirement(
+            #     db, requirement.id
+            # )
+    except DatabaseException as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return requirements
+
+
+@requirement_router.post("/")
+async def create_requirement_endpoint(
+    requirement: RequirementCreate, req: Request
+) -> dict[str, str]:
+    db = req.app.state.db
+    await create_requirement(db, requirement)
+    return {"message": "Requirement created"}
+
+
+@requirement_router.post("/{requirement_id}/items")
+async def create_items_endpoint(
+    requirement_id: str, items: list[ItemBase], req: Request
+) -> dict[str, str]:
+    db = req.app.state.db
+    await create_items(db, items, requirement_id)
+    return {"message": "Items created"}
+
+
+@requirement_router.get("/{requirement_id}")
+async def get_requirement_by_id_endpoint(
+    requirement_id: str, req: Request
+) -> RequirementWithItemsAndFund:
+    db = req.app.state.db
+    try:
+        requirement = await get_requirement(db, requirement_id)
+        requirement.items = await get_items_by_requirement(db, requirement.id)
+    except DatabaseException as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    result = RequirementWithItemsAndFund(
+        **requirement.model_dump(),
+    )
+    try:
+        result.recipient = await get_recipient_by_requirement(db, requirement.id)
+        result.fund = await get_funds_by_requirement(db, requirement.id)
+    finally:
+        return result
+
+
+@requirement_router.get("/categories")
+def get_categories() -> dict[str, list[str]]:
+    return {"categories": ["Food", "Medicine", "Equipment", "Other"]}
+
+
+@requirement_router.delete("/{requirement_id}")
+async def delete_requirement_endpoint(
+    requirement_id: str, req: Request
+) -> dict[str, str]:
+    db = req.app.state.db
+    await delete_requirement(db, requirement_id)
+    return {"message": f"Requirement with ID {requirement_id} deleted"}
+
+
+@router.post("/profile/login")
+async def login_endpoint(user_data: UserLogin, req: Request) -> LoginResponse:
+    db = req.app.state.db
+
+    if not (user := await user_login(db, user_data.email, user_data.password)):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    token = create_access_token(
+        data={"sub": user.email},
+    )
+
+    return LoginResponse(
+        access_token=token,
+        user_account=user,
+    )
+
+
+@router.get("/items")
+async def get_items_endpoint(req: Request, query: str = "") -> list[Item]:
+    db = req.app.state.db
+    try:
+        items = await (get_items(db, query) if query != "" else get_items(db))
+    except DatabaseException as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return items
+
+
+@router.get("/profile")
+async def get_profile_endpoint(
+    token: Annotated[str, Header()], req: Request, user_mail: str = ""
+) -> UserAccount:
+    db = req.app.state.db
+    if user_mail != "":
+        try:
+            return await get_user(db, user_mail)
+        except DatabaseException as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    decoded_token = decode_access_token(token).get("sub")
+    if not decoded_token:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    try:
+        return await get_user(db, decoded_token)
+    except DatabaseException as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+volunteer_router = APIRouter(prefix="/volunteer", tags=["api"])
+
+
+@volunteer_router.patch("/")
+async def update_volunteer_endpoint(
+    token: Annotated[str, Header()], volunteer_data: VolunteerUpdate, req: Request
+):
+
+    if not (decoded_token := decode_access_token(token).get("sub")):
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    db = req.app.state.db
+    try:
+        volunteer = await get_volunteer_by_email(db, decoded_token)
+        volunteer.email = (
+            volunteer_data.email if volunteer_data.email else volunteer.email
+        )
+        volunteer.phone = (
+            volunteer_data.phone if volunteer_data.phone else volunteer.phone
+        )
+        volunteer.name = volunteer_data.name if volunteer_data.name else volunteer.name
+        volunteer.surname = (
+            volunteer_data.surname if volunteer_data.surname else volunteer.surname
+        )
+        volunteer.age = volunteer_data.age if volunteer_data.age else volunteer.age
+        await update_volunteer(db, decoded_token, volunteer)
+        user = await get_user(db, decoded_token)
+        user.bio = volunteer_data.bio if volunteer_data.bio else user.bio
+        user.profile_pic = (
+            volunteer_data.profile_pic
+            if volunteer_data.profile_pic
+            else user.profile_pic
+        )
+        if user.bio != None:
+            await update_user_bio_by_email(db, decoded_token, user.bio)
+        if user.profile_pic != None:
+            await update_user_profile_pic_by_email(db, decoded_token, user.profile_pic)
+    except DatabaseException as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@volunteer_router.get("/{volunteer_id}/funds")
+async def get_volunteer_funds_endpoint(
+    volunteer_id: str, req: Request
+) -> list[DetailFund]:
+    db = req.app.state.db
+    funds = await get_funds_by_volunteer(db, volunteer_id)
+    if not funds:
+        raise HTTPException(status_code=404, detail="No funds found")
+    report, volunteer, requirements = await get_fund_details(db, funds[0].id)
+    detailed_funds = []
+    for fund in funds:
+        report, volunteer, requirements = await get_fund_details(db, fund.id)
+        detailed_funds.append(
+            DetailFund(
+                **fund.model_dump(),
+                report=report,
+                volunteer=volunteer,
+                requirement=requirements,
+            )
+        )
+
+    return detailed_funds
+
+
+@volunteer_router.get("/profile")
+async def get_volunteer_profile_endpoint(
+    token: Annotated[str | None, Header()], req: Request, id: str = ""
+) -> VolunteerWithUserAccount:
+    db = req.app.state.db
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Token is missing")
+
+    if not (decoded_token := decode_access_token(token).get("sub")):
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    try:
+        volunteer = await (
+            get_volunteer_by_email(db, decoded_token)
+            if id == ""
+            else get_volunteer_by_id(db, id)
+        )
+        user = await get_user(db, decoded_token)
+    except DatabaseException as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return VolunteerWithUserAccount(
+        **volunteer.model_dump(),
+        user_account=user,
+    )
+
+
+@volunteer_router.post("/profile/photo")
+async def upload_volunteer_photo_endpoint(
+    token: Annotated[str | None, Header()],
+    req: Request,
+    volunteer_photo: UploadFile = File(...),
+) -> dict[str, str]:
+    db = req.app.state.db
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Token is missing")
+
+    if not (decoded_token := decode_access_token(token).get("sub")):
+        raise HTTPException(status_code=401, detail="Invalid token")
+    filename = f"{uuid1()}.jpg"
+    save_file(volunteer_photo.file, filename)
+    try:
+        await update_user_profile_pic_by_email(
+            db, decoded_token, f"/uploads/{filename}"
+        )
+    except DatabaseException as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return {"profile_pic": f"/uploads/{filename}"}
+
+
+@volunteer_router.get("/dashboard")
+async def get_volunteer_dashboard_endpoint(
+    token: Annotated[str | None, Header()], req: Request
+) -> Dashboard:
+
+    if not token:
+        raise HTTPException(status_code=401, detail="Token is missing")
+
+    if not (email := decode_access_token(token).get("sub")):
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    db = req.app.state.db
+    detailed_funds = []
+    updated_requirements = []
+
+    try:
+        funds = await get_volunteer_funds_for_dash(db, email)
+        for fund in funds:
+            report, volunteer, requirements = await get_fund_details(db, fund.id)
+            detailed_funds.append(
+                DetailFund(
+                    **fund.model_dump(),
+                    report=report,
+                    volunteer=volunteer,
+                    requirement=requirements,
+                )
+            )
+
+        requirements = await get_volunteer_requirements_for_dash(db, email)
+        for requirement in requirements:
+            requirement.items = await get_items_by_requirement(db, requirement.id)
+            requirement.recipient = await get_recipient_by_requirement(
+                db, requirement.id
+            )
+            updated_requirements.append(requirement)
+    except DatabaseException as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return Dashboard(
+        funds=detailed_funds,
+        requirements=updated_requirements,
+    )
+
+
+recipient_router = APIRouter(prefix="/recipient", tags=["api"])
+
+
+@recipient_router.get("/{recipient_id}/requirements")
+async def get_recipient_funds_endpoint(recipient_id: str, req: Request) -> list:
+    db = req.app.state.db
+    try:
+        return await get_requirements_by_recipient(db, recipient_id)
+    except DatabaseException as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@recipient_router.get("/profile")
+async def get_recipient_profile_endpoint(
+    token: Annotated[str | None, Header()], req: Request
+) -> Recipient:
+    db = req.app.state.db
+    if not token:
+        raise HTTPException(status_code=401, detail="Token is missing")
+
+    if not (decoded_token := decode_access_token(token).get("sub")):
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    try:
+        return await get_recipient_by_email(db, decoded_token)
+    except DatabaseException as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@recipient_router.get("/dashboard")
+async def get_recipient_dashboard_endpoint(
+    token: Annotated[str | None, Header()], req: Request
+) -> Dashboard:
+    if not token:
+        raise HTTPException(status_code=401, detail="Token is missing")
+
+    if not (email := decode_access_token(token).get("sub")):
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    db = req.app.state.db
+
+    try:
+        recipient = await get_recipient_by_email(db, email)
+        requirements = await get_requirements_by_recipient(db, recipient.id)
+        funds = await get_five_last_funds(db)
+    except DatabaseException as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return Dashboard(
+        funds=funds,
+        requirements=requirements,
+    )
+import uuid
+from pkg.models import (
+    DetailFund,
+    Fund,
+    Item,
+    Recipient,
+    Report,
+    RequirementCreate,
+    ItemBase,
+    RequirementWithItems,
+    RoleEnum,
+    UserAccount,
+    Volunteer,
+    VolunteerWithUserAccount,
+)
+from databases import Database as DatabaseCore
+
+from pkg.utils import verify_password
+
+
+class DatabaseException(Exception): ...
+
+
+class Database:
+    def __init__(self, db_name: str):
+        self.connection = DatabaseCore(db_name)
+
+    async def connect(self):
+        await self.connection.connect()
+
+    async def create_tables(self):
+        await self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS UserAccount (
+    ID TEXT PRIMARY KEY,
+    Email TEXT NOT NULL UNIQUE,
+    PasswordHash TEXT NOT NULL,
+    Bio TEXT,
+    Role TEXT DEFAULT 'Volunteer' CHECK (Role IN ('Admin', 'Volunteer', 'Recipient')),
+    LastLogin TIMESTAMP,
+    ProfilePic TEXT
+);
+            """
+        )
+        await self.connection.execute(
+            """
+CREATE TABLE IF NOT EXISTS Specific (
+    ID INTEGER PRIMARY KEY,
+    Name TEXT NOT NULL,
+    Description TEXT
+); """
+        )
+
+        await self.connection.execute(
+            """
+CREATE TABLE IF NOT EXISTS Volunteer (
+    ID TEXT PRIMARY KEY,
+    Email TEXT,
+    Phone TEXT,
+    Name TEXT,
+    Surname TEXT,
+    Age TEXT,
+    Specific INTEGER,
+    Available BOOLEAN NOT NULL,
+    UserAccount TEXT,
+    FOREIGN KEY (Specific) REFERENCES Specific(ID),
+    FOREIGN KEY (UserAccount) REFERENCES UserAccount(ID)
+); """
+        )
+
+        await self.connection.execute(
+            """
+        CREATE TABLE IF NOT EXISTS Report (
+    ID TEXT PRIMARY KEY,
+    Rating INTEGER,
+    FinalConclution TEXT
+); """
+        )
+
+        await self.connection.execute(
+            """
+CREATE TABLE Fund (
+    ID TEXT PRIMARY KEY,
+    Name TEXT,
+    Description TEXT,
+    MonoJarUrl TEXT,
+    LongJarID TEXT,
+    Report TEXT,
+    Volunteer TEXT,
+    Status TEXT CHECK (Status IN ('Active', 'Completed', 'Cancelled')),
+    Picture TEXT, LongJarID TEXT default '-',
+    FOREIGN KEY (Report) REFERENCES Report(ID),
+    FOREIGN KEY (Volunteer) REFERENCES Volunteer(ID)
+); """
+        )
+
+        await self.connection.execute(
+            """
+CREATE TABLE IF NOT EXISTS Requirement (
+    ID TEXT PRIMARY KEY,
+    Deadline DATE,
+    Name TEXT NOT NULL,
+    Description TEXT,
+    Priority TEXT CHECK (Priority IN ('Default', 'High')),
+    Fund TEXT,
+    FOREIGN KEY (Fund) REFERENCES Fund(ID)
+); """
+        )
+
+        await self.connection.execute(
+            """
+    CREATE TABLE IF NOT EXISTS Item (
+    ID TEXT PRIMARY KEY,
+    Name TEXT NOT NULL,
+    Count INTEGER NOT NULL,
+    Requirement TEXT,
+    Category TEXT CHECK (Category IN ('Food', 'Medicine', 'Equipment', 'Other')),
+    Fund TEXT,
+    FOREIGN KEY (Fund) REFERENCES Fund(ID),
+    FOREIGN KEY (Requirement) REFERENCES Requirement(ID)
+); """
+        )
+
+        await self.connection.execute(
+            """
+CREATE TABLE IF NOT EXISTS Recipient (
+    ID TEXT PRIMARY KEY,
+    Name TEXT NOT NULL,
+    UserAccount TEXT,
+    FOREIGN KEY (UserAccount) REFERENCES UserAccount(ID)
+); """
+        )
+        await self.connection.execute(
+            """
+CREATE TABLE IF NOT EXISTS FundRecipient (
+    Fund TEXT,
+    Recipient TEXT,
+    DeliveredAt TIMESTAMP,
+    PRIMARY KEY (Fund, Recipient),
+    FOREIGN KEY (Fund) REFERENCES Fund(ID),
+    FOREIGN KEY (Recipient) REFERENCES Recipient(ID)
+); """
+        )
+
+    async def disconnect(self):
+        await self.connection.disconnect()
+
+
+async def get_funds_by_volunteer(db: Database, volunteer_id: str) -> list[Fund]:
+    query = """
+SELECT Fund.ID, Fund.Name, Fund.Description, Fund.MonoJarUrl, Fund.Status, Fund.Picture,
+             Fund.LongJarID
+FROM Fund
+JOIN Volunteer ON Fund.Volunteer = Volunteer.ID
+WHERE Fund.Volunteer = :volunteer_id
+"""
+
+    rows = await db.connection.fetch_all(
+        query=query, values={"volunteer_id": volunteer_id}
+    )
+
+    if rows:
+        return [
+            Fund(
+                id=f["ID"],
+                name=f["Name"],
+                description=f["Description"],
+                mono_jar_url=f["MonoJarUrl"],
+                status=f["Status"],
+                picture=f["Picture"],
+                long_jar_id=f["LongJarID"],
+            )
+            for f in rows
+        ]
+    return []
+
+
+async def get_funds(db: Database, search_line: str) -> list[Fund]:
+    query = """
+SELECT Fund.ID, Fund.Name, Fund.Description, Fund.MonoJarUrl, Fund.Status, Fund.Picture, Fund.LongJarID,
+            Volunteer.Name, Volunteer.Surname
+FROM Fund
+JOIN Volunteer ON Fund.Volunteer = Volunteer.ID
+WHERE Fund.Name LIKE :search_line OR Volunteer.Name LIKE :search_line OR Volunteer.Surname LIKE :search_line
+"""
+    rows = await db.connection.fetch_all(
+        query=query, values={"search_line": f"%{search_line}%"}
+    )
+    if rows:
+        return [
+            Fund(
+                id=f["ID"],
+                name=f["Name"],
+                description=f["Description"],
+                mono_jar_url=f["MonoJarUrl"],
+                status=f["Status"],
+                picture=f["Picture"],
+                long_jar_id=f["LongJarID"],
+            )
+            for f in rows
+        ]
+
+    return []
+
+
+async def get_fund_by_id(db: Database, fund_id: str) -> Fund:
+    query = """
+SELECT Fund.ID, Fund.Name, Fund.Description, Fund.MonoJarUrl, Fund.Status, Fund.Picture, Fund.LongJarID
+FROM Fund WHERE Fund.ID = :fund_id
+"""
+    row = await db.connection.fetch_one(query=query, values={"fund_id": fund_id})
+    if row:
+        return Fund(
+            id=row["ID"],
+            name=row["Name"],
+            description=row["Description"],
+            mono_jar_url=row["MonoJarUrl"],
+            status=row["Status"],
+            picture=row["Picture"],
+            long_jar_id=row["LongJarID"],
+        )
+    raise DatabaseException("Fund not found")
+
+
+async def get_funds_by_requirement(db: Database, requirement_id: str) -> list[Fund]:
+    query = """
+SELECT Fund.ID, Fund.Name, Fund.Description, Fund.MonoJarUrl, Fund.Status, Fund.Picture, Fund.LongJarID
+FROM Fund
+JOIN Requirement ON Fund.ID = Requirement.Fund
+WHERE Requirement.ID = :requirement_id
+"""
+    rows = await db.connection.fetch_all(
+        query=query, values={"requirement_id": requirement_id}
+    )
+
+    if rows:
+        return [
+            Fund(
+                id=f["ID"],
+                name=f["Name"],
+                description=f["Description"],
+                mono_jar_url=f["MonoJarUrl"],
+                status=f["Status"],
+                picture=f["Picture"],
+                long_jar_id=f["LongJarID"],
+            )
+            for f in rows
+        ]
+    return []
+
+
+async def get_volunteer_by_fund(db: Database, fund_id: str) -> Volunteer:
+    query = """
+SELECT Volunteer.ID, Volunteer.Name, Volunteer.Surname, Volunteer.Email, Volunteer.Phone, Volunteer.Age, Volunteer.Available
+FROM Volunteer 
+JOIN Fund ON Volunteer.ID = Fund.Volunteer
+WHERE Fund.ID = :fund_id
+"""
+    row = await db.connection.fetch_one(query=query, values={"fund_id": fund_id})
+    if row:
+        return Volunteer(
+            id=row["ID"],
+            name=row["Name"],
+            surname=row["Surname"],
+            email=row["Email"],
+            phone=row["Phone"],
+            age=row["Age"],
+            available=row["Available"],
+        )
+    raise DatabaseException("Volunteer not found")
+
+
+async def get_requirement_by_fund(db: Database, fund_id: str) -> RequirementWithItems:
+    query = """
+SELECT Requirement.ID, Requirement.Deadline, Requirement.Name, Requirement.Priority, Requirement.Description
+FROM Requirement
+JOIN Fund ON Requirement.Fund = Fund.ID
+WHERE Fund.ID = :fund_id
+"""
+    row = await db.connection.fetch_one(query=query, values={"fund_id": fund_id})
+    if row:
+        items = await get_items_by_requirement(db, row["ID"])
+        return RequirementWithItems(
+            id=row["ID"],
+            name=row["Name"],
+            deadline=row["Deadline"],
+            priority=row["Priority"],
+            description=row["Description"],
+            items=items,
+        )
+    raise DatabaseException("Requirement not found")
+
+
+async def get_report_by_fund(db: Database, fund_id: str) -> Report:
+    query = """
+SELECT Report.ID, Report.Rating, Report.FinalConclution
+FROM Report
+JOIN Fund ON Report.ID = Fund.Report
+WHERE Fund.ID = :fund_id
+"""
+    row = await db.connection.fetch_one(query=query, values={"fund_id": fund_id})
+    if row:
+        return Report(
+            id=row["ID"],
+            rating=row["Rating"],
+            final_conclution=row["FinalConclution"],
+        )
+    raise DatabaseException("Report not found")
+
+
+async def delete_requirement(db: Database, requirement_id: str):
+    query = "DELETE FROM Requirement WHERE ID = :requirement_id"
+    await db.connection.execute(query=query, values={"requirement_id": requirement_id})
+
+
+async def get_requirements(
+    db: Database, search_line: str | None = None
+) -> list[RequirementWithItems]:
+    query = (
+        """
+SELECT Requirement.ID, Requirement.Deadline, Requirement.Name, Requirement.Priority, Requirement.Description
+FROM Requirement
+WHERE Requirement.Name LIKE :search_line OR Requirement.Description LIKE :search_line
+"""
+        if search_line
+        else "SELECT * FROM Requirement"
+    )
+    rows = await db.connection.fetch_all(
+        query=query, values={"search_line": f"%{search_line}%"} if search_line else {}
+    )
+    if rows:
+        return [
+            RequirementWithItems(
+                id=r["ID"],
+                name=r["Name"],
+                deadline=r["Deadline"],
+                priority=r["Priority"],
+                description=r["Description"],
+            )
+            for r in rows
+        ]
+    return []
+
+
+async def get_items_by_requirement(db: Database, requirement_id: str) -> list[Item]:
+    query = "SELECT id, name, count, category, ReservedBy FROM Item WHERE requirement = :requirement_id"
+    rows = await db.connection.fetch_all(
+        query=query, values={"requirement_id": requirement_id}
+    )
+    if rows:
+        return [
+            Item(
+                id=i["ID"],
+                name=i["Name"],
+                count=i["Count"],
+                category=i["Category"],
+                reserved_by=i["ReservedBy"],
+            )
+            for i in rows
+        ]
+    return []
+
+
+async def get_items(db: Database, search_line: str | None = None) -> list[Item]:
+    query = (
+        """
+SELECT Item.ID, Item.Name, Item.Count, Item.Category, Item.ReservedBy
+FROM Item
+WHERE Item.Name LIKE :search_line OR Item.Category LIKE :search_line
+"""
+        if search_line
+        else "SELECT * FROM Item"
+    )
+    rows = await db.connection.fetch_all(
+        query=query, values={"search_line": f"%{search_line}%"} if search_line else {}
+    )
+    if rows:
+        return [
+            Item(
+                id=i["ID"],
+                name=i["Name"],
+                count=i["Count"],
+                category=i["Category"],
+                reserved_by=i["ReservedBy"],
+            )
+            for i in rows
+        ]
+    return []
+
+
+async def create_requirement(db: Database, requirement: RequirementCreate):
+    requirement_id = str(uuid.uuid4())
+
+    query = """
+INSERT INTO Requirement (ID, Deadline, Name, Priority, Fund)
+VALUES (:id, :deadline, :name, :priority, :fund)
+"""
+    await db.connection.execute(
+        query=query,
+        values={
+            "id": requirement_id,
+            "deadline": requirement.deadline,
+            "name": requirement.name,
+            "priority": requirement.priority,
+            "fund": requirement.fund_id,
+        },
+    )
+
+
+async def create_items(db: Database, items: list[ItemBase], requirement_id: str):
+    for item in items:
+        item_id = str(uuid.uuid4())
+        query = """
+INSERT INTO Item (ID, Name, Count, Requirement, Category, Fund)
+VALUES (:id, :name, :count, :requirement_id, :category, :fund)
+"""
+        await db.connection.execute(
+            query=query,
+            values={
+                "id": item_id,
+                "name": item.name,
+                "count": item.count,
+                "requirement_id": requirement_id,
+                "category": item.category,
+                "fund": None,
+            },
+        )
+
+
+async def user_login(db: Database, email: str, password: str) -> UserAccount:
+    query = "SELECT * FROM UserAccount WHERE Email = :email"
+    user = await db.connection.fetch_one(query=query, values={"email": email})
+    if user and verify_password(password, user["PasswordHash"]):
+        return UserAccount(
+            id=user["ID"],
+            email=user["Email"],
+            bio=user["Bio"],
+            role=user["Role"],
+            last_login=user["LastLogin"],
+            profile_pic=user["ProfilePic"],
+        )
+    raise DatabaseException("Invalid email or password")
+
+
+async def get_user(db: Database, email: str) -> UserAccount:
+    query = "SELECT * FROM UserAccount WHERE Email = :email"
+    user = await db.connection.fetch_one(query=query, values={"email": email})
+    if user:
+        return UserAccount(
+            id=user["ID"],
+            email=user["Email"],
+            bio=user["Bio"],
+            role=user["Role"],
+            last_login=user["LastLogin"],
+            profile_pic=user["ProfilePic"],
+        )
+    raise DatabaseException("User not found")
+
+
+async def get_volunteer_funds_for_dash(db: Database, volunteer_mail: str) -> list[Fund]:
+    query = """
+SELECT Fund.ID, Fund.Name, Fund.Description, Fund.MonoJarUrl, Fund.Status, Fund.Picture, Fund.LongJarID
+    FROM Fund
+JOIN Volunteer ON Fund.Volunteer = Volunteer.ID
+WHERE Volunteer.Email = :volunteer_mail
+"""
+    rows = await db.connection.fetch_all(
+        query=query, values={"volunteer_mail": volunteer_mail}
+    )
+
+    if rows:
+        return [
+            Fund(
+                id=f["ID"],
+                name=f["Name"],
+                description=f["Description"],
+                mono_jar_url=f["MonoJarUrl"],
+                status=f["Status"],
+                picture=f["Picture"],
+                long_jar_id=f["LongJarID"],
+            )
+            for f in rows
+        ]
+    return []
+
+
+async def get_volunteer_requirements_for_dash(
+    db: Database, volunteer_mail: str
+) -> list[RequirementWithItems]:
+    query = """
+SELECT Requirement.ID, Requirement.Deadline, Requirement.Name, Requirement.priority, Requirement.Description
+FROM Requirement
+JOIN Fund ON Requirement.Fund = Fund.ID
+JOIN Volunteer ON Fund.Volunteer = Volunteer.ID
+WHERE Volunteer.Email = :volunteer_mail limit 5
+"""
+    rows = await db.connection.fetch_all(
+        query=query, values={"volunteer_mail": volunteer_mail}
+    )
+
+    if rows:
+        items = await get_items_by_requirement(db, rows[0]["ID"])
+        return [
+            RequirementWithItems(
+                id=r["ID"],
+                name=r["Name"],
+                deadline=r["Deadline"],
+                priority=r["Priority"],
+                description=r["Description"],
+                items=items,
+            )
+            for r in rows
+        ]
+    return []
+
+
+async def get_fund_details(
+    db: Database, fund_id: str
+) -> tuple[Report, Volunteer, RequirementWithItems]:
+    report = await get_report_by_fund(db, fund_id)
+    volunteer = await get_volunteer_by_fund(db, fund_id)
+    requirement = await get_requirement_by_fund(db, fund_id)
+    requirement.recipient = await get_recipient_by_requirement(db, requirement.id)
+
+    return (
+        report,
+        volunteer,
+        requirement,
+    )
+
+
+async def get_recipient_by_requirement(db: Database, requirement_id: str) -> Recipient:
+    query = """
+SELECT Recipient.ID, Recipient.Name
+FROM Recipient
+JOIN FundRecipient ON Recipient.ID = FundRecipient.Recipient
+JOIN Fund ON FundRecipient.Fund = Fund.ID
+JOIN Requirement ON Fund.ID = Requirement.Fund
+WHERE Requirement.ID = :requirement_id
+"""
+    row = await db.connection.fetch_one(
+        query=query, values={"requirement_id": requirement_id}
+    )
+    if row:
+        return Recipient(
+            id=row["ID"],
+            name=row["Name"],
+        )
+    raise DatabaseException("Recipient not found")
+
+
+async def get_volunteer_by_email(db: Database, email: str) -> Volunteer:
+    query = """
+SELECT Volunteer.ID, Volunteer.Name, Volunteer.Surname, Volunteer.Email, Volunteer.Phone, Volunteer.Age, Volunteer.Available
+FROM Volunteer
+JOIN UserAccount ON Volunteer.UserAccount = UserAccount.ID
+WHERE UserAccount.Email = :email
+"""
+    row = await db.connection.fetch_one(query=query, values={"email": email})
+    if row:
+        return Volunteer(
+            id=row["ID"],
+            name=row["Name"],
+            surname=row["Surname"],
+            email=row["Email"],
+            phone=row["Phone"],
+            age=row["Age"],
+            available=row["Available"],
+        )
+    raise DatabaseException("Volunteer not found")
+
+
+async def get_requirements_by_recipient(
+    db: Database, recipient_id: str
+) -> list[RequirementWithItems]:
+    query = """
+SELECT Requirement.ID, Requirement.Deadline, Requirement.Name, Requirement.Priority, Requirement.Description
+FROM Requirement
+JOIN Fund ON Requirement.Fund = Fund.ID
+JOIN FundRecipient ON Fund.ID = FundRecipient.Fund
+JOIN Recipient ON FundRecipient.Recipient = Recipient.ID
+WHERE Recipient.ID = :recipient_id
+"""
+    rows = await db.connection.fetch_all(
+        query=query, values={"recipient_id": recipient_id}
+    )
+    if rows:
+        return [
+            RequirementWithItems(
+                id=r["ID"],
+                name=r["Name"],
+                deadline=r["Deadline"],
+                priority=r["Priority"],
+                description=r["Description"],
+            )
+            for r in rows
+        ]
+    return []
+
+
+async def get_recipient_by_email(db: Database, email: str) -> Recipient:
+    query = """
+SELECT Recipient.ID, Recipient.Name
+FROM Recipient
+JOIN UserAccount ON Recipient.UserAccount = UserAccount.ID
+WHERE UserAccount.Email = :email
+"""
+    row = await db.connection.fetch_one(query=query, values={"email": email})
+    if row:
+        return Recipient(
+            id=row["ID"],
+            name=row["Name"],
+        )
+    raise DatabaseException("Recipient not found")
+
+
+async def get_five_last_funds(db: Database) -> list[DetailFund]:
+    query = """
+SELECT Fund.ID, Fund.Name, Fund.Description, Fund.MonoJarUrl, Fund.Status, Fund.Picture, Fund.LongJarID
+FROM Fund
+ORDER BY Fund.ID DESC
+LIMIT 5
+"""
+    rows = await db.connection.fetch_all(query=query)
+    result = []
+    if rows:
+        for f in rows:
+            report, volunteer, requirement = await get_fund_details(db, f["ID"])
+            result.append(
+                DetailFund(
+                    id=f["ID"],
+                    name=f["Name"],
+                    description=f["Description"],
+                    mono_jar_url=f["MonoJarUrl"],
+                    status=f["Status"],
+                    picture=f["Picture"],
+                    requirement=requirement,
+                    long_jar_id=f["LongJarID"],
+                    report=report,
+                    volunteer=volunteer,
+                )
+            )
+    return result
+
+
+async def get_requirement(db: Database, requirement_id: str) -> RequirementWithItems:
+    query = """
+SELECT Requirement.ID, Requirement.Deadline, Requirement.Name, Requirement.Priority, Requirement.Description
+FROM Requirement
+WHERE Requirement.ID = :requirement_id
+"""
+    row = await db.connection.fetch_one(
+        query=query, values={"requirement_id": requirement_id}
+    )
+    if row:
+        items = await get_items_by_requirement(db, row["ID"])
+        return RequirementWithItems(
+            id=row["ID"],
+            name=row["Name"],
+            deadline=row["Deadline"],
+            priority=row["Priority"],
+            description=row["Description"],
+            items=items,
+        )
+    raise DatabaseException("Requirement not found")
+
+
+async def update_volunteer(db: Database, start_mail: str, volunteer_info: Volunteer):
+    query = """
+UPDATE Volunteer
+SET Email = :email, Phone = :phone, Name = :name, Surname = :surname, Age = :age, Available = :available
+WHERE Email = :start_mail 
+"""
+    await db.connection.execute(
+        query=query,
+        values={
+            "start_mail": start_mail,
+            "email": volunteer_info.email,
+            "phone": volunteer_info.phone,
+            "name": volunteer_info.name,
+            "surname": volunteer_info.surname,
+            "age": volunteer_info.age,
+            "available": volunteer_info.available,
+        },
+    )
+
+
+async def update_user_profile_pic_by_email(db: Database, email: str, profile_pic: str):
+    query = "UPDATE UserAccount SET ProfilePic = :profile_pic WHERE Email = :email"
+    print(f"Updating profile pic for {email} to {profile_pic}")
+    await db.connection.execute(
+        query=query,
+        values={
+            "email": email,
+            "profile_pic": profile_pic,
+        },
+    )
+
+
+async def update_user_bio_by_email(db: Database, email: str, bio: str):
+    query = "UPDATE UserAccount SET Bio = :bio WHERE Email = :email"
+    await db.connection.execute(
+        query=query,
+        values={
+            "email": email,
+            "bio": bio,
+        },
+    )
+
+
+async def update_volunteer_by_email(
+    db: Database, email: str, volunteer_info: Volunteer
+):
+    query = """
+UPDATE Volunteer
+SET Email = :email, Phone = :phone, Name = :name, Surname = :surname, Age = :age, Available = :available
+WHERE Email = :curr_email 
+"""
+    await db.connection.execute(
+        query=query,
+        values={
+            "curr_email": email,
+            "email": volunteer_info.email,
+            "phone": volunteer_info.phone,
+            "name": volunteer_info.name,
+            "surname": volunteer_info.surname,
+            "age": volunteer_info.age,
+            "available": volunteer_info.available,
+        },
+    )
+
+
+async def update_fund_picture(db: Database, fund_id: str, picture: str):
+    query = "UPDATE Fund SET Picture = :picture WHERE ID = :fund_id"
+    await db.connection.execute(
+        query=query,
+        values={
+            "fund_id": fund_id,
+            "picture": picture,
+        },
+    )
+
+
+async def get_volunteer_by_id(db: Database, volunteer_id: str) -> Volunteer:
+    query = """
+SELECT Volunteer.ID, Volunteer.Name, Volunteer.Surname, Volunteer.Email, Volunteer.Phone, Volunteer.Age, Volunteer.Available
+FROM Volunteer
+JOIN UserAccount ON Volunteer.UserAccount = UserAccount.ID
+WHERE Volunteer.ID = :volunteer_id
+"""
+    row = await db.connection.fetch_one(
+        query=query, values={"volunteer_id": volunteer_id}
+    )
+
+    if row:
+        return Volunteer(
+            id=row["ID"],
+            name=row["Name"],
+            surname=row["Surname"],
+            email=row["Email"],
+            phone=row["Phone"],
+            age=row["Age"],
+            available=row["Available"],
+        )
+    raise DatabaseException("Volunteer not found")
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from pkg.api import (
+    router,
+    recipient_router,
+    volunteer_router,
+    requirement_router,
+    fund_router,
+)
+from pkg.database import Database
+from pkg.middleware import PrintBodyMiddleware
+from contextlib import asynccontextmanager
+
+from pkg.utils import UPLOAD_PATH
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db = Database("sqlite+aiosqlite:///database.db")
+    await db.connect()
+    app.state.db = db
+    print("Database connected")
+    yield
+    await db.disconnect()
+    print("Database disconnected")
+
+
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(PrintBodyMiddleware)
+app.include_router(
+    router,
+    prefix="/api",
+    tags=["api"],
+)
+app.include_router(
+    recipient_router,
+    prefix="/api",
+    tags=["recipient"],
+)
+app.include_router(
+    volunteer_router,
+    prefix="/api",
+    tags=["volunteer"],
+)
+app.include_router(
+    requirement_router,
+    prefix="/api",
+    tags=["requirement"],
+)
+app.include_router(
+    fund_router,
+    prefix="/api",
+    tags=["fund"],
+)
+
+app.mount("/api/uploads", StaticFiles(directory=UPLOAD_PATH), name="uploads")
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, port=8000, host="0.0.0.0")
+
+
+
+Також з rfp документу можу виписати таку інформацію
+Створення системи яка організовує процес зборів коштів волонтерами та
+дозволяє відстежувати їх діяльність. Введення рейтингів для оцінки роботи
+волонтера.
+
+Анотація (мета, основні функції, складові)
+Мета: Створення централізованої системи зборів.
+Програмна система має такі основні функції:
+1) реєстрація та авторизація у системі;
+2) створення зборів;
+3) пошук та фільтрація;
+4) надсилання звітності;
+5) система рейтингу волонтерів;
+6) локалізація інтерфейсу;
+7) перегляд і взаємодія зі зборами.
+
+Складові програмної системи:
+1) серверна API частина; (примітка для chat gpt. фокусуємось тут)
+2) вебзастосунок;
+3) мобільний застосунок.
+
+чи достатньо тобі інформації ?
+
+
+Повторюся, мені треба лише опис згенерований тобою для того аби я міг документально оформити свою програмку для звіту до університету. Якщо казати за структуру то 
+.
+├── bin
+│   ├── __pycache__
+│   └── server.py
+├── database.db
+├── db.sqlite
+├── Dockerfile
+├── pkg
+│   ├── api.py
+│   ├── database.py
+│   ├── __init__.py
+│   ├── middleware.py
+│   ├── models.py
+│   ├── __pycache__
+│   └── utils.py
+├── __pycache__
+│   └── main.cpython-312.pyc
+├── pyproject.toml
+├── README.md
+├── requirements.txt
+├── tests
+│   ├── api
+│   └── controlerls
+├── uploads
+│   ├── 23b670b4-29a4-11f0-a995-9c2f9d649aaf.jpg
+│   ├── alphapvp.jpg
+│   ├── avata.jpg
+│   ├── default_avatar.png
+│   ├── e3d9083a-29ad-11f0-9f68-9c2f9d649aaf.jpg
+│   └── f3258764-29a3-11f0-8870-9c2f9d649aaf.jpg
+└── uv.lock
+
+10 directories, 21 files
+
+
+Об'єкт розробки – серверна частина (back-end) програмної системи для автоматизації процесів збору пожертв, обліку закупівель та звітності в межах волонтерської ініціативи. Ця частина включає інтеграцію з базою даних, реалізацію бізнес-логіки для обробки запитів, забезпечення захисту даних та взаємодії з клієнтською частиною.
+
+Мета розробки – створити надійну й ефективну серверну платформу, яка дозволить автоматизувати основні процеси обліку фінансових надходжень, управління закупівлями, веденням звітів, а також забезпечить безпечну обробку даних і зручну інтеграцію з фронтенд-застосунками або іншими сервісами.
+
+Метод рішення – використання фреймворку FastAPI на мові Python для побудови RESTful API, що реалізує основну бізнес-логіку. Для зберігання даних використовується SQLite як легка база даних у форматі файлу, що спрощує розгортання та тестування. У проєкті також реалізовано обробку файлів (наприклад, зображень) і підтримку модульного тестування. Контейнеризація за допомогою Docker забезпечує зручність розгортання в будь-якому середовищі.
+
+Результат розробки – створено модульну, масштабовану та безпечну серверну частину, яка забезпечує всі необхідні функції для обліку пожертв, ведення закупівель, звітності та взаємодії з користувачами через HTTP API.
+
+usecase 
+----
+graph TB
+    actorAdmin([Адміністратор]):::actor
+    actorAdmin --> login(Увійти в акаунт)
+
+    login --> viewProfile(Перегляд власного профілю):::extend
+    viewProfile --> editProfile(Редагування профілю):::extend
+
+    login --> manageUsers(Керування користувачами):::extend
+    manageUsers --> viewUsers(Перегляд користувачів):::include
+    manageUsers --> deleteUsers(Видалення користувачів):::extend
+
+    login --> manageDonations(Керування пожертвами):::extend
+    manageDonations --> viewDonations(Перегляд пожертв):::include
+    manageDonations --> editDonations(Редагування пожертв):::extend
+
+    login --> managePurchases(Керування закупівлями):::extend
+    managePurchases --> viewPurchases(Перегляд закупівель):::include
+    managePurchases --> updatePurchaseStatus(Редагування статусу закупівель):::extend
+
+    login --> manageReports(Керування звітами):::extend
+    manageReports --> viewReports(Перегляд звітів):::include
+    manageReports --> exportReports(Експорт звітів):::extend
+
+    classDef actor fill:#f2f2f2,stroke:#333,stroke-width:1px;
+    classDef extend stroke-dasharray: 5 5;
+    classDef include stroke-dasharray: 2 2;
+
+------
+
+graph TB
+    classDef actor fill:#f2f2f2,stroke:#333,stroke-width:1px;
+
+    actorAdmin([Адміністратор]):::actor
+    actorAdmin --> login(Увійти в акаунт)
+
+    login --> ext1((<<extend>>)) --> viewProfile(Перегляд власного профілю)
+    viewProfile --> ext2((<<extend>>)) --> editProfile(Редагування профілю)
+
+    login --> ext3((<<extend>>)) --> manageUsers(Керування користувачами)
+    manageUsers --> inc1((<<include>>)) --> viewUsers(Перегляд користувачів)
+    manageUsers --> ext4((<<extend>>)) --> deleteUsers(Видалення користувачів)
+
+    login --> ext5((<<extend>>)) --> manageDonations(Керування пожертвами)
+    manageDonations --> inc2((<<include>>)) --> viewDonations(Перегляд пожертв)
+    manageDonations --> ext6((<<extend>>)) --> editDonations(Редагування пожертв)
+
+    login --> ext7((<<extend>>)) --> managePurchases(Керування закупівлями)
+    managePurchases --> inc3((<<include>>)) --> viewPurchases(Перегляд закупівель)
+    managePurchases --> ext8((<<extend>>)) --> updatePurchaseStatus(Редагування статусу закупівель)
+
+    login --> ext9((<<extend>>)) --> manageReports(Керування звітами)
+    manageReports --> inc4((<<include>>)) --> viewReports(Перегляд звітів)
+    manageReports --> ext10((<<extend>>)) --> exportReports(Експорт звітів)
+
+
+

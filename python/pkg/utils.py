@@ -7,11 +7,14 @@ import jwt
 from fastapi import HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from passlib.context import CryptContext
+import pathlib
+import shutil
 
 dotenv.load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY", "aslkdfjalskdfj")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60))
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 60 * 24 * 7))
+UPLOAD_PATH = os.getenv("UPLOAD_PATH", "uploads")
 
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -49,3 +52,14 @@ def decode_access_token(token: str):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token"
         )
+
+
+UPLOAD_DIR = pathlib.Path(UPLOAD_PATH)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def save_file(file, filename: str) -> str:
+    file_path = UPLOAD_DIR / filename
+    with file_path.open("wb") as f:
+        shutil.copyfileobj(file, f)
+    return str(file_path)
