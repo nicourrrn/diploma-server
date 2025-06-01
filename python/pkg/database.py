@@ -7,17 +7,28 @@ from pkg.models import (
     Recipient,
     Report,
     ReportBase,
+    RequirementBase,
     RequirementCreate,
     ItemBase,
     RequirementWithItems,
-    RoleEnum,
-    UserAccount,
+    StatusEnum,
     Volunteer,
-    VolunteerWithUserAccount,
 )
 from databases import Database as DatabaseCore
+import asyncpg
 
 from pkg.utils import verify_password
+
+
+class DatabasePg:
+    def __init__(self, db_url: str):
+        self.db_url = db_url
+
+    async def connect(self):
+        self.conn = await asyncpg.connect(self.db_url)
+
+    async def disconnect(self):
+        await self.conn.close()
 
 
 class DatabaseException(Exception): ...
@@ -32,94 +43,80 @@ class Database:
 
     async def create_tables(self):
         await self.connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS UserAccount (
-    ID TEXT PRIMARY KEY,
-    Email TEXT NOT NULL UNIQUE,
-    PasswordHash TEXT NOT NULL,
-    Bio TEXT,
-    Role TEXT DEFAULT 'Volunteer' CHECK (Role IN ('Admin', 'Volunteer', 'Recipient')),
-    LastLogin TIMESTAMP,
-    ProfilePic TEXT
-);
-            """
-        )
-        await self.connection.execute(
-            """
-CREATE TABLE IF NOT EXISTS Specific (
-    ID INTEGER PRIMARY KEY,
-    Name TEXT NOT NULL,
-    Description TEXT
-); """
+            """ CREATE TABLE IF NOT EXISTS Specific (
+        ID TEXT PRIMARY KEY,
+        Name TEXT NOT NULL,
+        Description TEXT
+        ); """
         )
 
         await self.connection.execute(
-            """
+            """ 
 CREATE TABLE IF NOT EXISTS Volunteer (
-    ID TEXT PRIMARY KEY,
-    Email TEXT,
-    Phone TEXT,
-    Name TEXT,
-    Surname TEXT,
-    Age TEXT,
-    Specific INTEGER,
-    Available BOOLEAN NOT NULL,
-    UserAccount TEXT,
-    FOREIGN KEY (Specific) REFERENCES Specific(ID),
-    FOREIGN KEY (UserAccount) REFERENCES UserAccount(ID)
+        ID TEXT PRIMARY KEY,
+        Email TEXT,
+        PasswordHash TEXT,
+        ProfilePic TEXT,
+        Phone TEXT,
+        Name TEXT,
+        Surname TEXT,
+        Age TEXT,
+        Specific INTEGER,
+        Available BOOLEAN default true,
+        FOREIGN KEY (Specific) REFERENCES Specific(ID)
 ); """
         )
 
         await self.connection.execute(
             """
-        CREATE TABLE IF NOT EXISTS Report (
-    ID TEXT PRIMARY KEY,
-    Rating INTEGER,
-    FinalConclution TEXT
+CREATE TABLE IF NOT EXISTS Report (
+        ID TEXT PRIMARY KEY,
+        Rating INTEGER,
+        FinalConclution TEXT
 ); """
         )
 
         await self.connection.execute(
             """
-CREATE TABLE Fund (
-    ID TEXT PRIMARY KEY,
-    Name TEXT,
-    Description TEXT,
-    MonoJarUrl TEXT,
-    LongJarID TEXT,
-    Report TEXT,
-    Volunteer TEXT,
-    Status TEXT CHECK (Status IN ('Active', 'Completed', 'Cancelled')) DEFAULT 'Active',
-    Picture TEXT, LongJarID TEXT default '-',
-    FOREIGN KEY (Report) REFERENCES Report(ID),
-    FOREIGN KEY (Volunteer) REFERENCES Volunteer(ID)
+CREATE TABLE IF NOT EXISTS Fund (
+        ID TEXT PRIMARY KEY,
+        Name TEXT,
+        Description TEXT,
+        MonoJarUrl TEXT,
+        Report TEXT,
+        Volunteer TEXT,
+        Status TEXT CHECK (Status IN ('Active', 'Completed', 'Cancelled')),
+        Picture TEXT,
+        LongJarID TEXT default '',
+        FOREIGN KEY (Report) REFERENCES Report(ID),
+        FOREIGN KEY (Volunteer) REFERENCES Volunteer(ID)
 ); """
         )
 
         await self.connection.execute(
             """
 CREATE TABLE IF NOT EXISTS Requirement (
-    ID TEXT PRIMARY KEY,
-    Deadline DATE,
-    Name TEXT NOT NULL,
-    Description TEXT,
-    Priority TEXT CHECK (Priority IN ('Default', 'High')),
-    Fund TEXT,
-    FOREIGN KEY (Fund) REFERENCES Fund(ID)
+        ID TEXT PRIMARY KEY,
+        Deadline DATE,
+        Name TEXT NOT NULL,
+        Priority TEXT CHECK (Priority IN ('Default', 'High')),
+        Description TEXT,
+        Recipient TEXT,
+        FOREIGN KEY (Recipient) REFERENCES Recipient(ID)
 ); """
         )
 
         await self.connection.execute(
             """
     CREATE TABLE IF NOT EXISTS Item (
-    ID TEXT PRIMARY KEY,
-    Name TEXT NOT NULL,
-    Count INTEGER NOT NULL,
-    Requirement TEXT,
-    Category TEXT CHECK (Category IN ('Food', 'Medicine', 'Equipment', 'Other')),
-    Fund TEXT,
-    FOREIGN KEY (Fund) REFERENCES Fund(ID),
-    FOREIGN KEY (Requirement) REFERENCES Requirement(ID)
+        ID TEXT PRIMARY KEY,
+        Name TEXT NOT NULL,
+        Count INTEGER NOT NULL,
+        Requirement TEXT,
+        Category TEXT CHECK (Category IN ('Food', 'Medicine', 'Equipment', 'Other')),
+        ReservedBy TEXT,
+        FOREIGN KEY (Requirement) REFERENCES Requirement(ID)
+        FOREIGN KEY (ReservedBy) REFERENCES Fund(ID)
 ); """
         )
 
@@ -128,19 +125,9 @@ CREATE TABLE IF NOT EXISTS Requirement (
 CREATE TABLE IF NOT EXISTS Recipient (
     ID TEXT PRIMARY KEY,
     Name TEXT NOT NULL,
-    UserAccount TEXT,
-    FOREIGN KEY (UserAccount) REFERENCES UserAccount(ID)
-); """
-        )
-        await self.connection.execute(
-            """
-CREATE TABLE IF NOT EXISTS FundRecipient (
-    Fund TEXT,
-    Recipient TEXT,
-    DeliveredAt TIMESTAMP,
-    PRIMARY KEY (Fund, Recipient),
-    FOREIGN KEY (Fund) REFERENCES Fund(ID),
-    FOREIGN KEY (Recipient) REFERENCES Recipient(ID)
+    Email TEXT,
+    PasswordHash TEXT,
+    ProfilePic TEXT
 ); """
         )
 
@@ -180,9 +167,8 @@ WHERE Fund.Volunteer = :volunteer_id
 async def get_funds(db: Database, search_line: str = "") -> list[Fund]:
     query = """
 SELECT Fund.ID, Fund.Name, Fund.Description, Fund.MonoJarUrl, Fund.Status, Fund.Picture, Fund.LongJarID,
-            Volunteer.Name, Volunteer.Surname
 FROM Fund
-    JOIN Volunteer ON Fund.Volunteer = Volunteer.ID
+JOIN Volunteer ON Fund.Volunteer = Volunteer.ID
 """
     if search_line != "":
         query += """
@@ -266,11 +252,11 @@ WHERE Fund.ID = :fund_id
     if row:
         return Volunteer(
             id=row["ID"],
-            name=row["Name"],
-            surname=row["Surname"],
-            email=row["Email"],
-            phone=row["Phone"],
-            age=row["Age"],
+            name=row["Name"] or "No name",
+            surname=row["Surname"] or "",
+            email=row["Email"] or "null@example.com",
+            phone=row["Phone"] or "",
+            age=row["Age"] or "",
             available=row["Available"],
         )
     raise DatabaseException("Volunteer not found")
@@ -281,21 +267,22 @@ async def get_requirement_by_fund(db: Database, fund_id: str) -> RequirementWith
     query = """
 SELECT Requirement.ID, Requirement.Deadline, Requirement.Name, Requirement.Priority, Requirement.Description
 FROM Requirement
-JOIN Fund ON Requirement.Fund = Fund.ID
+JOIN Item on Item.Requirement = Requirement.ID
+JOIN Fund on Item.ReservedBy = Fund.ID
 WHERE Fund.ID = :fund_id
+GROUP BY Requirement.ID
 """
     row = await db.connection.fetch_one(query=query, values={"fund_id": fund_id})
     if row:
-        items = await get_items_by_requirement(db, row["ID"])
         return RequirementWithItems(
             id=row["ID"],
             name=row["Name"],
             deadline=row["Deadline"],
             priority=row["Priority"],
             description=row["Description"],
-            items=items,
+            items=await get_items_by_requirement(db, row["ID"]),
         )
-    raise DatabaseException("Requirement not found")
+    raise DatabaseException("Requirement not found for fund ID: " + fund_id)
 
 
 async def get_report_by_fund(db: Database, fund_id: str) -> Report | None:
@@ -417,12 +404,14 @@ WHERE Item.Name LIKE :search_line OR Item.Category LIKE :search_line
     return []
 
 
-async def create_requirement(db: Database, requirement: RequirementCreate):
+async def create_requirement(
+    db: Database, requirement: RequirementCreate, recipient_id: str
+) -> str:
     requirement_id = str(uuid.uuid4())
 
     query = """
-INSERT INTO Requirement (ID, Deadline, Name, Priority, Fund)
-VALUES (:id, :deadline, :name, :priority, :fund)
+INSERT INTO Requirement (ID, Deadline, Name, Priority, Fund, Description, Recipient)
+VALUES (:id, :deadline, :name, :priority, :fund, :description, :recipient)
 """
     await db.connection.execute(
         query=query,
@@ -432,16 +421,19 @@ VALUES (:id, :deadline, :name, :priority, :fund)
             "name": requirement.name,
             "priority": requirement.priority,
             "fund": requirement.fund_id,
+            "description": requirement.description,
+            "recipient": recipient_id,
         },
     )
+    return requirement_id
 
 
 async def create_items(db: Database, items: list[ItemBase], requirement_id: str):
     for item in items:
         item_id = str(uuid.uuid4())
         query = """
-INSERT INTO Item (ID, Name, Count, Requirement, Category, Fund)
-VALUES (:id, :name, :count, :requirement_id, :category, :fund)
+INSERT INTO Item (ID, Name, Count, Requirement, Category)
+VALUES (:id, :name, :count, :requirement_id, :category)
 """
         await db.connection.execute(
             query=query,
@@ -451,50 +443,71 @@ VALUES (:id, :name, :count, :requirement_id, :category, :fund)
                 "count": item.count,
                 "requirement_id": requirement_id,
                 "category": item.category,
-                "fund": None,
             },
         )
 
 
-async def user_login(db: Database, email: str, password: str) -> UserAccount:
-    query = "SELECT * FROM UserAccount WHERE Email = :email"
+async def user_login(db: Database, email: str, password: str) -> Volunteer | Recipient:
+    query = "SELECT * FROM Volunteer WHERE Email = :email"
     user = await db.connection.fetch_one(query=query, values={"email": email})
     if user and verify_password(password, user["PasswordHash"]):
-        return UserAccount(
+        return Volunteer(
             id=user["ID"],
             email=user["Email"],
-            bio=user["Bio"],
-            role=user["Role"],
-            last_login=user["LastLogin"],
+            profile_pic=user["ProfilePic"],
+            phone=user["Phone"],
+            name=user["Name"],
+            surname=user["Surname"],
+            age=user["Age"],
+            available=user["Available"],
+        )
+    query = "SELECT * FROM Recipient WHERE Email = :email"
+    user = await db.connection.fetch_one(query=query, values={"email": email})
+    if user and verify_password(password, user["PasswordHash"]):
+        return Recipient(
+            id=user["ID"],
+            name=user["Name"],
+            email=user["Email"],
             profile_pic=user["ProfilePic"],
         )
     raise DatabaseException("Invalid email or password")
 
 
-async def get_user(db: Database, email: str) -> UserAccount:
-    query = "SELECT * FROM UserAccount WHERE Email = :email"
-    user = await db.connection.fetch_one(query=query, values={"email": email})
-    if user:
-        return UserAccount(
-            id=user["ID"],
-            email=user["Email"],
-            bio=user["Bio"],
-            role=user["Role"],
-            last_login=user["LastLogin"],
-            profile_pic=user["ProfilePic"],
+async def get_user(db: Database, email: str) -> Volunteer | Recipient:
+    query = "SELECT * FROM Volunteer WHERE Email = :email "
+    row = await db.connection.fetch_one(query=query, values={"email": email})
+    if row:
+        return Volunteer(
+            id=row["ID"],
+            email=row["Email"],
+            profile_pic=row["ProfilePic"],
+            phone=row["Phone"],
+            name=row["Name"],
+            surname=row["Surname"],
+            age=row["Age"],
+            available=row["Available"],
         )
-    raise DatabaseException("User not found")
+    query = "SELECT * FROM Recipient WHERE Email = :email"
+    row = await db.connection.fetch_one(query=query, values={"email": email})
+    if row:
+        return Recipient(
+            id=row["ID"],
+            name=row["Name"],
+            email=row["Email"],
+            profile_pic=row["ProfilePic"],
+        )
+    raise DatabaseException(f"User not found with email: {email}")
 
 
-async def get_volunteer_funds_for_dash(db: Database, volunteer_mail: str) -> list[Fund]:
+async def get_volunteer_funds_for_dash(db: Database, volunteer_id: str) -> list[Fund]:
     query = """
 SELECT Fund.ID, Fund.Name, Fund.Description, Fund.MonoJarUrl, Fund.Status, Fund.Picture, Fund.LongJarID
     FROM Fund
 JOIN Volunteer ON Fund.Volunteer = Volunteer.ID
-WHERE Volunteer.Email = :volunteer_mail
+WHERE Volunteer.ID = :volunteer_id
 """
     rows = await db.connection.fetch_all(
-        query=query, values={"volunteer_mail": volunteer_mail}
+        query=query, values={"volunteer_id": volunteer_id}
     )
 
     if rows:
@@ -519,16 +532,13 @@ async def get_volunteer_requirements_for_dash(
     query = """
 SELECT Requirement.ID, Requirement.Deadline, Requirement.Name, Requirement.priority, Requirement.Description
 FROM Requirement
-JOIN Fund ON Requirement.Fund = Fund.ID
-JOIN Volunteer ON Fund.Volunteer = Volunteer.ID
-WHERE Volunteer.Email = :volunteer_mail limit 5
+FULL JOIN Fund ON Requirement.Fund = Fund.ID
+FULL JOIN Volunteer ON Fund.Volunteer = Volunteer.ID
+limit 5
 """
-    rows = await db.connection.fetch_all(
-        query=query, values={"volunteer_mail": volunteer_mail}
-    )
+    rows = await db.connection.fetch_all(query=query)
 
     if rows:
-        items = await get_items_by_requirement(db, rows[0]["ID"])
         return [
             RequirementWithItems(
                 id=r["ID"],
@@ -536,35 +546,18 @@ WHERE Volunteer.Email = :volunteer_mail limit 5
                 deadline=r["Deadline"],
                 priority=r["Priority"],
                 description=r["Description"],
-                items=items,
+                items=await get_items_by_requirement(db, r["ID"]),
             )
             for r in rows
         ]
     return []
 
 
-async def get_fund_details(
-    db: Database, fund_id: str
-) -> tuple[Report, Volunteer, RequirementWithItems]:
-    report = await get_report_by_fund(db, fund_id)
-    volunteer = await get_volunteer_by_fund(db, fund_id)
-    requirement = await get_requirement_by_fund(db, fund_id)
-    requirement.recipient = await get_recipient_by_requirement(db, requirement.id)
-
-    return (
-        report,
-        volunteer,
-        requirement,
-    )
-
-
 async def get_recipient_by_requirement(db: Database, requirement_id: str) -> Recipient:
     query = """
-SELECT Recipient.ID, Recipient.Name
+SELECT Recipient.ID, Recipient.Name, Recipient.Email
 FROM Recipient
-JOIN FundRecipient ON Recipient.ID = FundRecipient.Recipient
-JOIN Fund ON FundRecipient.Fund = Fund.ID
-JOIN Requirement ON Fund.ID = Requirement.Fund
+JOIN Requirement ON Recipient.ID = Requirement.Recipient
 WHERE Requirement.ID = :requirement_id
 """
     row = await db.connection.fetch_one(
@@ -574,27 +567,28 @@ WHERE Requirement.ID = :requirement_id
         return Recipient(
             id=row["ID"],
             name=row["Name"],
+            email=row["Email"] if row["Email"] else "none@example.com",
         )
     raise DatabaseException("Recipient not found")
 
 
 async def get_volunteer_by_email(db: Database, email: str) -> Volunteer:
     query = """
-SELECT Volunteer.ID, Volunteer.Name, Volunteer.Surname, Volunteer.Email, Volunteer.Phone, Volunteer.Age, Volunteer.Available
+SELECT Volunteer.ID, Volunteer.Name, Volunteer.Surname, Volunteer.Email, Volunteer.Phone, Volunteer.Age, Volunteer.Available, Volunteer.ProfilePic
 FROM Volunteer
-JOIN UserAccount ON Volunteer.UserAccount = UserAccount.ID
-WHERE UserAccount.Email = :email
+WHERE Volunteer.Email = :email
 """
     row = await db.connection.fetch_one(query=query, values={"email": email})
     if row:
         return Volunteer(
             id=row["ID"],
-            name=row["Name"],
-            surname=row["Surname"],
-            email=row["Email"],
-            phone=row["Phone"],
-            age=row["Age"],
+            name=row["Name"] or "No name",
+            surname=row["Surname"] or "",
+            email=row["Email"] or "null@example.com",
+            phone=row["Phone"] or "",
+            age=row["Age"] or "",
             available=row["Available"],
+            profile_pic=row["ProfilePic"] or "",
         )
     raise DatabaseException("Volunteer not found")
 
@@ -605,9 +599,7 @@ async def get_requirements_by_recipient(
     query = """
 SELECT Requirement.ID, Requirement.Deadline, Requirement.Name, Requirement.Priority, Requirement.Description
 FROM Requirement
-JOIN Fund ON Requirement.Fund = Fund.ID
-JOIN FundRecipient ON Fund.ID = FundRecipient.Fund
-JOIN Recipient ON FundRecipient.Recipient = Recipient.ID
+JOIN Recipient ON Requirement.Recipient = Recipient.ID
 WHERE Recipient.ID = :recipient_id
 """
     rows = await db.connection.fetch_all(
@@ -631,14 +623,14 @@ async def get_recipient_by_email(db: Database, email: str) -> Recipient:
     query = """
 SELECT Recipient.ID, Recipient.Name
 FROM Recipient
-JOIN UserAccount ON Recipient.UserAccount = UserAccount.ID
-WHERE UserAccount.Email = :email
+WHERE Recipient.Email = :email
 """
     row = await db.connection.fetch_one(query=query, values={"email": email})
     if row:
         return Recipient(
             id=row["ID"],
             name=row["Name"],
+            email=email,
         )
     raise DatabaseException("Recipient not found")
 
@@ -654,7 +646,13 @@ LIMIT 5
     result = []
     if rows:
         for f in rows:
-            report, volunteer, requirement = await get_fund_details(db, f["ID"])
+            report = await get_report_by_fund(db, f["ID"])
+            volunteer = await get_volunteer_by_fund(db, f["ID"])
+            requirement = await get_requirement_by_fund(db, f["ID"])
+            if requirement:
+                requirement.recipient = await get_recipient_by_requirement(
+                    db, requirement.id
+                )
             result.append(
                 DetailFund(
                     id=f["ID"],
@@ -691,7 +689,7 @@ WHERE Requirement.ID = :requirement_id
             description=row["Description"],
             items=items,
         )
-    raise DatabaseException("Requirement not found")
+    raise DatabaseException("Requirement not found for ID: " + requirement_id)
 
 
 async def update_volunteer(db: Database, start_mail: str, volunteer_info: Volunteer):
@@ -715,26 +713,19 @@ WHERE Email = :start_mail
 
 
 async def update_user_profile_pic_by_email(db: Database, email: str, profile_pic: str):
-    query = "UPDATE UserAccount SET ProfilePic = :profile_pic WHERE Email = :email"
+    queries = [
+        "UPDATE Recipient SET ProfilePic = :profile_pic WHERE Email = :email",
+        "UPDATE Volunteer SET ProfilePic = :profile_pic WHERE Email = :email",
+    ]
     print(f"Updating profile pic for {email} to {profile_pic}")
-    await db.connection.execute(
-        query=query,
-        values={
-            "email": email,
-            "profile_pic": profile_pic,
-        },
-    )
-
-
-async def update_user_bio_by_email(db: Database, email: str, bio: str):
-    query = "UPDATE UserAccount SET Bio = :bio WHERE Email = :email"
-    await db.connection.execute(
-        query=query,
-        values={
-            "email": email,
-            "bio": bio,
-        },
-    )
+    for query in queries:
+        await db.connection.execute(
+            query=query,
+            values={
+                "email": email,
+                "profile_pic": profile_pic,
+            },
+        )
 
 
 async def update_volunteer_by_email(
@@ -772,9 +763,8 @@ async def update_fund_picture(db: Database, fund_id: str, picture: str):
 
 async def get_volunteer_by_id(db: Database, volunteer_id: str) -> Volunteer:
     query = """
-SELECT Volunteer.ID, Volunteer.Name, Volunteer.Surname, Volunteer.Email, Volunteer.Phone, Volunteer.Age, Volunteer.Available
+SELECT Volunteer.ID, Volunteer.Name, Volunteer.Surname, Volunteer.Email, Volunteer.Phone, Volunteer.Age, Volunteer.Available, Volunteer.ProfilePic
 FROM Volunteer
-JOIN UserAccount ON Volunteer.UserAccount = UserAccount.ID
 WHERE Volunteer.ID = :volunteer_id
 """
     row = await db.connection.fetch_one(
@@ -790,6 +780,7 @@ WHERE Volunteer.ID = :volunteer_id
             phone=row["Phone"],
             age=row["Age"],
             available=row["Available"],
+            profile_pic=row["ProfilePic"] or "",
         )
     raise DatabaseException("Volunteer not found")
 
@@ -817,63 +808,38 @@ VALUES (:id, :name, :description, :mono_jar_url, :long_jar_id, :status, :picture
         },
     )
 
-    recipient_id = await get_recipient_by_requirement(db, fund.requirement_id)
-
-    query = """
-INSERT INTO FundRecipient (Fund, Recipient, DeliveredAt)
-VALUES (:fund_id, :recipient_id, :delivered_at)
-"""
-    await db.connection.execute(
-        query=query,
-        values={
-            "fund_id": fund_id,
-            "recipient_id": recipient_id.id,
-            "delivered_at": "2023-10-01 00:00:00",
-        },
-    )
-
     return fund_id
 
 
-async def update_requirement_with_fund(db: Database, requirement_id: str, fund_id: str):
-    query = """
-UPDATE Requirement 
-SET Fund = :fund_id
-WHERE ID = :requirement_id
-"""
-    print(f"Updating requirement {requirement_id} with fund {fund_id}")
-    await db.connection.execute(
-        query=query,
-        values={
-            "requirement_id": requirement_id,
-            "fund_id": fund_id,
-        },
-    )
-
-
 async def update_fund_by_id(db: Database, fund_id: str, fund_info: FundCreate):
-    query = """
+    if fund_info.name is not None and fund_info.name != "":
+        await update_fund_field_by_id(db, fund_id, "Name", fund_info.name)
+
+    if fund_info.description is not None and fund_info.name != "":
+        await update_fund_field_by_id(db, fund_id, "Description", fund_info.description)
+
+    if fund_info.status != StatusEnum.none:
+        await update_fund_field_by_id(db, fund_id, "Status", fund_info.status)
+
+
+async def update_fund_field_by_id(db: Database, fund_id: str, field: str, value: str):
+    query = f"""
 UPDATE Fund
-SET Name = :name, Description = :description, MonoJarUrl = :mono_jar_url, LongJarID = :long_jar_id, Status = :status, Picture = :picture
-WHERE ID = :fund_id 
+SET {field} = :value
+WHERE ID = :fund_id
 """
     await db.connection.execute(
         query=query,
         values={
             "fund_id": fund_id,
-            "name": fund_info.name,
-            "description": fund_info.description,
-            "mono_jar_url": fund_info.mono_jar_url,
-            "long_jar_id": fund_info.long_jar_id,
-            "status": fund_info.status,
-            "picture": fund_info.picture,
+            "value": value,
         },
     )
 
 
 async def update_items_with_fund(db: Database, items: list[str], fund_id: str):
     for item in items:
-        query = "UPDATE Item SET Fund = :fund_id WHERE ID = :item_id"
+        query = "UPDATE Item SET ReservedBy = :fund_id WHERE ID = :item_id"
         await db.connection.execute(
             query=query,
             values={
@@ -887,8 +853,9 @@ async def get_funds_by_recipient(db: Database, recipient_id: str) -> list[Fund]:
     query = """
 SELECT Fund.ID, Fund.Name, Fund.Description, Fund.MonoJarUrl, Fund.Status, Fund.Picture, Fund.LongJarID
 FROM Fund
-JOIN FundRecipient ON Fund.ID = FundRecipient.Fund
-JOIN Recipient ON FundRecipient.Recipient = Recipient.ID
+JOIN Item ON Fund.ID = Item.ReservedBy
+JOIN Requirement ON Item.Requirement = Requirement.ID
+JOIN Recipient ON Requirement.Recipient = Recipient.ID
 WHERE Recipient.ID = :recipient_id
 """
     rows = await db.connection.fetch_all(
@@ -909,6 +876,46 @@ WHERE Recipient.ID = :recipient_id
             for f in rows
         ]
     return []
+
+
+async def get_funds_by_recipient(db: Database, recipient_id: str) -> list[DetailFund]:
+    query = """
+SELECT Fund.ID, Fund.Name, Fund.Description, Fund.MonoJarUrl, Fund.Status, Fund.Picture, Fund.LongJarID
+FROM Fund
+Join item on item.ReservedBy = fund.id
+join Requirement on requirement.id = item.Requirement
+where Requirement.Recipient = :recipient_id
+group by Fund.Id, Fund.Name
+limit 5
+"""
+    rows = await db.connection.fetch_all(
+        query=query, values={"recipient_id": recipient_id}
+    )
+    result = []
+    if rows:
+        for f in rows:
+            report = await get_report_by_fund(db, f["ID"])
+            volunteer = await get_volunteer_by_fund(db, f["ID"])
+            requirement = await get_requirement_by_fund(db, f["ID"])
+            if requirement:
+                requirement.recipient = await get_recipient_by_requirement(
+                    db, requirement.id
+                )
+            result.append(
+                DetailFund(
+                    id=f["ID"],
+                    name=f["Name"],
+                    description=f["Description"],
+                    mono_jar_url=f["MonoJarUrl"],
+                    status=f["Status"],
+                    picture=f["Picture"],
+                    requirement=requirement,
+                    long_jar_id=f["LongJarID"],
+                    report=report,
+                    volunteer=volunteer,
+                )
+            )
+    return result
 
 
 async def create_report(db: Database, report: Report) -> str:
@@ -954,3 +961,22 @@ WHERE ID = :fund_id
             "fund_id": fund_id,
         },
     )
+
+
+async def update_requirement_by_id(
+    db: Database, requirement_id: str, requirement_info: RequirementBase
+):
+    for field, value in requirement_info.model_dump().items():
+        if value is not None:
+            query = f""" 
+UPDATE Requirement
+SET {field} = :value
+WHERE ID = :requirement_id
+"""
+            await db.connection.execute(
+                query=query,
+                values={
+                    "requirement_id": requirement_id,
+                    "value": value,
+                },
+            )

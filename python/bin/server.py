@@ -1,36 +1,53 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from pkg.api import (
-    router,
     recipient_router,
     volunteer_router,
     requirement_router,
     fund_router,
+    profile_router,
 )
-from pkg.database import Database
+from pkg.database import Database, DatabasePg
 from pkg.middleware import PrintBodyMiddleware
 from contextlib import asynccontextmanager
 
 from pkg.utils import UPLOAD_PATH
+import dotenv
+import os
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    dotenv.load_dotenv()
+    logging.info("Connecting to the database...")
+    pg_db = os.getenv("DATABASE_URL", None)
+    if pg_db:
+        db = DatabasePg(pg_db)
+    else:
+        logging.info("Using SQLite database")
     db = Database("sqlite+aiosqlite:///database.db")
     await db.connect()
+    await db.create_tables()
     app.state.db = db
-    print("Database connected")
+    logging.info("Database connected")
     yield
     await db.disconnect()
-    print("Database disconnected")
+    logging.info("Database disconnected")
 
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(PrintBodyMiddleware)
+app.mount("/api/uploads", StaticFiles(directory=UPLOAD_PATH), name="uploads")
 app.include_router(
-    router,
+    profile_router,
     prefix="/api",
-    tags=["api"],
+    tags=["profile"],
 )
 app.include_router(
     recipient_router,
@@ -53,7 +70,6 @@ app.include_router(
     tags=["fund"],
 )
 
-app.mount("/api/uploads", StaticFiles(directory=UPLOAD_PATH), name="uploads")
 
 if __name__ == "__main__":
     import uvicorn
